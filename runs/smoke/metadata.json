@@ -1,0 +1,24 @@
+{
+  "charset": " 0123456789.,!?;:-_()[]{}\"'/\\|@#$%&*+=<>ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÁáÄäÇçÉéĞğİıÑñŊŋÓóÖöŞşÚúÜüÝý",
+  "config": {
+    "image_height": 48,
+    "min_width": 96,
+    "max_width": 384,
+    "cnn_channels": 256,
+    "rnn_hidden": 256,
+    "rnn_layers": 2,
+    "dropout": 0.1
+  },
+  "args": {
+    "train_manifest": null,
+    "val_manifest": null,
+    "corpus": null,
+    "fonts_dir": null,
+    "save_dir": "runs\\smoke",
+    "epochs": 1,
+    "batch_size": 2,
+    "steps_per_epoch": 2,
+    "num_workers": 0,
+    "lr": 0.001
+  }
+}

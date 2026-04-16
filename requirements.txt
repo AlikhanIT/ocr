@@ -1,0 +1,9 @@
+numpy>=1.26
+Pillow>=10.0
+torch>=2.2
+tqdm>=4.66
+transformers>=4.41
+torchvision>=0.17
+safetensors>=0.4
+paddlepaddle>=3.0.0
+paddleocr>=3.0.0
