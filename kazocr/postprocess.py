@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-WORD_RE = re.compile(r"[0-9A-Za-zÁÄÇÉĞİIıÑŊÓÖŞÚÜÝáäçéğiñŋóöşúüý'-]+", re.UNICODE)
+WORD_RE = re.compile(r"[0-9A-Za-zÁÄÇÉĞİIıÑŊÓÖŞÚÜÝáäçéğıñŋóöşúüý'-]+", re.UNICODE)
 
 ASCII_TO_KAZ = str.maketrans(
     {
@@ -64,22 +64,26 @@ COMMON_CONFUSIONS = str.maketrans(
     }
 )
 
-
-def _edit_distance(a: str, b: str) -> int:
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        cur = [i]
-        for j, cb in enumerate(b, start=1):
-            cost = 0 if ca == cb else 1
-            cur.append(min(cur[-1] + 1, prev[j] + 1, prev[j - 1] + cost))
-        prev = cur
-    return prev[-1]
+LOW_COST_SUBS = {
+    ("o", "a"),
+    ("a", "o"),
+    ("u", "y"),
+    ("y", "u"),
+    ("u", "v"),
+    ("v", "u"),
+    ("i", "l"),
+    ("l", "i"),
+    ("i", "j"),
+    ("j", "i"),
+    ("t", "l"),
+    ("l", "t"),
+    ("q", "g"),
+    ("g", "q"),
+    ("m", "n"),
+    ("n", "m"),
+    ("s", "z"),
+    ("z", "s"),
+}
 
 
 def normalize_token(token: str) -> str:
@@ -101,6 +105,40 @@ def restore_case(source: str, target: str) -> str:
     return target
 
 
+def weighted_distance(a: str, b: str) -> float:
+    if a == b:
+        return 0.0
+    if not a:
+        return float(len(b))
+    if not b:
+        return float(len(a))
+
+    prev = [0.0]
+    for ch in b:
+        prev.append(prev[-1] + (0.65 if ch in {"y", "i", "l"} else 1.0))
+
+    for ca in a:
+        delete_cost = 0.65 if ca in {"y", "i", "l"} else 1.0
+        cur = [prev[0] + delete_cost]
+        for j, cb in enumerate(b, start=1):
+            insert_cost = 0.65 if cb in {"y", "i", "l"} else 1.0
+            if ca == cb:
+                sub_cost = 0.0
+            elif (ca, cb) in LOW_COST_SUBS:
+                sub_cost = 0.35
+            else:
+                sub_cost = 1.0
+            cur.append(
+                min(
+                    cur[-1] + insert_cost,
+                    prev[j] + delete_cost,
+                    prev[j - 1] + sub_cost,
+                )
+            )
+        prev = cur
+    return prev[-1]
+
+
 @dataclass
 class CorrectionResult:
     raw_text: str
@@ -112,10 +150,23 @@ class CorrectionResult:
 class KazakhWordCorrector:
     def __init__(self, lexicon_path: str | None = None) -> None:
         default_path = Path(__file__).parent / "resources" / "kazakh_lexicon.txt"
-        path = Path(lexicon_path) if lexicon_path else default_path
-        self.words = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        paths = [Path(lexicon_path)] if lexicon_path else [default_path]
+
+        user_path = Path(__file__).resolve().parents[1] / "user_lexicon.txt"
+        if user_path.exists():
+            paths.append(user_path)
+
+        words: list[str] = []
+        for path in paths:
+            words.extend(line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+
+        self.words = list(dict.fromkeys(words))
         self.folded = {word: fold_token(word) for word in self.words}
         self.folded_values = set(self.folded.values())
+        self.by_initial: dict[str, list[tuple[str, str]]] = {}
+        for word, folded_word in self.folded.items():
+            key = folded_word[:1]
+            self.by_initial.setdefault(key, []).append((word, folded_word))
 
     def looks_kazakhish(self, token: str) -> str:
         lowered = token.lower()
@@ -126,25 +177,57 @@ class KazakhWordCorrector:
     def best_match(self, token: str) -> str:
         cleaned = normalize_token(token)
         folded = fold_token(cleaned)
-        if not folded or len(folded) <= 1 or any(ch.isdigit() for ch in folded):
+        if not folded or any(ch.isdigit() for ch in folded):
             return cleaned
+
         if folded in self.folded_values:
             for word, folded_word in self.folded.items():
                 if folded_word == folded:
                     return restore_case(token, word)
 
+        candidate_pool = list(self.by_initial.get(folded[:1], []))
+        if len(folded) <= 3:
+            candidate_pool = list(self.folded.items())
+        if not candidate_pool:
+            candidate_pool = list(self.folded.items())
+
         best_word = cleaned
-        best_score = 999
-        for word, folded_word in self.folded.items():
+        best_score = 999.0
+        second_score = 999.0
+
+        for word, folded_word in candidate_pool:
             if abs(len(folded_word) - len(folded)) > 2:
                 continue
-            score = _edit_distance(folded, folded_word)
-            if word[:1].lower() == cleaned[:1].lower():
+            score = weighted_distance(folded, folded_word)
+            if len(folded) >= 4 and folded_word.startswith(folded[:2]):
                 score -= 0.25
+            if len(folded) >= 5 and folded_word.endswith(folded[-2:]):
+                score -= 0.2
             if score < best_score:
+                second_score = best_score
                 best_score = score
                 best_word = word
-        if best_score <= max(1.5, len(folded) * 0.34):
+            elif score < second_score:
+                second_score = score
+
+        exact_diacritic_upgrade = fold_token(best_word) == folded and best_word != cleaned
+        if exact_diacritic_upgrade:
+            return restore_case(token, best_word)
+
+        normalized_score = best_score / max(1.0, len(folded))
+        margin = second_score - best_score
+
+        if len(folded) <= 2:
+            if normalized_score <= 0.34 and margin >= 0.2:
+                return restore_case(token, best_word)
+            return restore_case(token, self.looks_kazakhish(cleaned))
+        if len(folded) == 3:
+            if normalized_score <= 0.28 and margin >= 0.2:
+                return restore_case(token, best_word)
+            return restore_case(token, self.looks_kazakhish(cleaned))
+        if normalized_score <= 0.16:
+            return restore_case(token, best_word)
+        if normalized_score <= 0.22 and margin >= 0.18:
             return restore_case(token, best_word)
         return restore_case(token, self.looks_kazakhish(cleaned))
 
