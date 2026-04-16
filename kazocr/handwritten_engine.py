@@ -22,6 +22,7 @@ class HandwrittenKazOCR:
         cache_root = Path(__file__).resolve().parents[1] / ".paddlex_cache"
         cache_root.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache_root))
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
         try:
             from paddleocr import PaddleOCR
@@ -38,20 +39,27 @@ class HandwrittenKazOCR:
         )
         self.corrector = KazakhWordCorrector(lexicon_path=lexicon_path)
 
+    def _resize_for_page_ocr(self, image: Image.Image) -> Image.Image:
+        max_width = 1280
+        if image.width <= max_width:
+            return image
+        scale = max_width / max(1, image.width)
+        target_size = (max_width, max(1, int(image.height * scale)))
+        return image.resize(target_size, Image.Resampling.LANCZOS)
+
     def _prepare_variants(self, image: Image.Image) -> list[Image.Image]:
-        base = ImageOps.autocontrast(image.convert("L"))
+        base = ImageOps.autocontrast(self._resize_for_page_ocr(image).convert("L"))
         variants: list[Image.Image] = [base]
 
-        variants.append(base.filter(ImageFilter.SHARPEN))
-        variants.append(ImageEnhance.Contrast(base).enhance(1.6))
-        variants.append(ImageEnhance.Sharpness(base).enhance(1.8))
+        # Keep the default path fast. Extra variants help mostly on small crops.
+        if base.width < 900 and base.height < 260:
+            variants.append(base.filter(ImageFilter.SHARPEN))
+            variants.append(ImageEnhance.Contrast(base).enhance(1.45))
 
         arr = np.asarray(base, dtype=np.uint8)
-        binary = np.where(arr < 190, 0, 255).astype(np.uint8)
-        variants.append(Image.fromarray(binary, mode="L"))
-
-        strong_binary = np.where(arr < 165, 0, 255).astype(np.uint8)
-        variants.append(Image.fromarray(strong_binary, mode="L"))
+        if base.width < 900 and base.height < 260:
+            binary = np.where(arr < 185, 0, 255).astype(np.uint8)
+            variants.append(Image.fromarray(binary, mode="L"))
 
         prepared: list[Image.Image] = []
         seen = set()
@@ -114,7 +122,13 @@ class HandwrittenKazOCR:
     def recognize(self, image: Image.Image) -> OCRResponse:
         best_raw = ""
         best_score = -10.0
-        for variant in self._prepare_variants(image):
+        variants = self._prepare_variants(image)
+
+        # Full-page handwriting on CPU should stay responsive: use a single fast pass.
+        if image.width >= 1000 or image.height >= 420:
+            variants = variants[:1]
+
+        for variant in variants:
             raw_text, score = self._recognize_variant(variant)
             if score > best_score:
                 best_raw = raw_text
