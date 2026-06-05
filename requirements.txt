@@ -1,9 +1,19 @@
+# Core deep-learning stack. Install torch separately for your CUDA version, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.3
+torchvision>=0.18
+safetensors>=0.4
+
+# Local vision-language OCR engine (Qwen2.5-VL)
+transformers>=4.49
+accelerate>=0.30
+qwen-vl-utils>=0.0.8
+
+# Imaging / utils
 numpy>=1.26
 Pillow>=10.0
-torch>=2.2
 tqdm>=4.66
-transformers>=4.41
-torchvision>=0.17
-safetensors>=0.4
-paddlepaddle>=3.0.0
-paddleocr>=3.0.0
+
+# Optional: 4-bit quantization to run the 7B model on a 16 GB GPU.
+# On Windows this can conflict with torch CUDA DLLs; install only if needed.
+# bitsandbytes>=0.43

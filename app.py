@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from kazocr.handwritten_engine import HandwrittenKazOCR
+from kazocr.vlm_engine import VLMKazOCR
 
 
 class KazOCRApp:
@@ -17,7 +18,7 @@ class KazOCRApp:
         self.root.geometry("1100x760")
         self.root.configure(bg="#f4efe7")
 
-        self.engine: HandwrittenKazOCR | None = None
+        self.engine: VLMKazOCR | None = None
         self.current_image: Image.Image | None = None
         self.current_photo: ImageTk.PhotoImage | None = None
 
@@ -55,7 +56,13 @@ class KazOCRApp:
         actions = ttk.Frame(outer, style="Main.TFrame")
         actions.pack(fill="x", pady=(18, 12))
         ttk.Button(actions, text="Open Image", command=self.open_image, style="Action.TButton").pack(side="left")
-        ttk.Button(actions, text="Recognize", command=self.recognize_current, style="Action.TButton").pack(side="left", padx=10)
+        # Disabled until the model finishes loading so users can't trigger a
+        # premature "model still loading" popup.
+        self.recognize_btn = ttk.Button(
+            actions, text="Recognize", command=self.recognize_current, style="Action.TButton"
+        )
+        self.recognize_btn.state(["disabled"])
+        self.recognize_btn.pack(side="left", padx=10)
         ttk.Button(actions, text="Clear", command=self.clear_state, style="Action.TButton").pack(side="left")
 
         status = ttk.Label(outer, textvariable=self.status_var, style="Body.TLabel")
@@ -86,20 +93,29 @@ class KazOCRApp:
         self.changes_text.pack(fill="both", expand=True, pady=(8, 0))
 
     def _load_engine_async(self) -> None:
-        self.status_var.set("Loading handwritten OCR model. First run can take a while because weights are downloaded.")
+        self.status_var.set(
+            "Loading the recognition model into the GPU (~30 s). The Recognize "
+            "button turns on when it is ready. First ever run also downloads weights."
+        )
 
         def worker() -> None:
             try:
-                engine = HandwrittenKazOCR()
+                engine = VLMKazOCR()
             except Exception as exc:
-                self.root.after(0, lambda: self.status_var.set(f"Model load failed: {exc}"))
+                # Bind the message now: `exc` is cleared when the except block
+                # exits, so referencing it later in the lambda would NameError
+                # and leave the UI stuck on "loading" forever.
+                msg = f"Model load failed: {exc}"
+                traceback.print_exc()
+                self.root.after(0, lambda m=msg: self.status_var.set(m))
                 return
             self.root.after(0, lambda: self._set_engine(engine))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _set_engine(self, engine: HandwrittenKazOCR) -> None:
+    def _set_engine(self, engine: VLMKazOCR) -> None:
         self.engine = engine
+        self.recognize_btn.state(["!disabled"])
         self.status_var.set("Model is ready. Open an image with handwritten Kazakh Latin text.")
 
     def open_image(self) -> None:
@@ -128,12 +144,15 @@ class KazOCRApp:
             messagebox.showinfo("KazOCR", "Model is still loading.")
             return
         self.status_var.set("Recognizing text...")
+        self.recognize_btn.state(["disabled"])
 
         def worker() -> None:
             try:
                 result = self.engine.recognize(self.current_image.copy())
             except Exception as exc:
-                self.root.after(0, lambda: self.status_var.set(f"Recognition failed: {exc}"))
+                msg = f"Recognition failed: {exc}"
+                traceback.print_exc()
+                self.root.after(0, lambda m=msg: (self.status_var.set(m), self.recognize_btn.state(["!disabled"])))
                 return
             self.root.after(0, lambda: self._apply_result(result.raw_text, result.corrected_text, result.changed_tokens))
 
@@ -148,6 +167,7 @@ class KazOCRApp:
         else:
             self._fill_text(self.changes_text, "No lexicon-based corrections were applied.")
         self.status_var.set("Done. Compare raw OCR and corrected text.")
+        self.recognize_btn.state(["!disabled"])
 
     def _fill_text(self, widget: tk.Text, value: str) -> None:
         widget.delete("1.0", "end")

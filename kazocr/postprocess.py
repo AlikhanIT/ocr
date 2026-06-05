@@ -174,16 +174,32 @@ class KazakhWordCorrector:
             return lowered.translate(ASCII_TO_KAZ)
         return token
 
+    SPECIAL = set("áäçéğıİñóöşúüýÁÄÇÉĞÑÓÖŞÚÜÝ")
+
+    def _special_count(self, text: str) -> int:
+        return sum(ch in self.SPECIAL for ch in text)
+
     def best_match(self, token: str) -> str:
         cleaned = normalize_token(token)
         folded = fold_token(cleaned)
         if not folded or any(ch.isdigit() for ch in folded):
             return cleaned
 
+        # The VLM produces clean Kazakh-Latin with reliable diacritics, so be
+        # conservative: a token that already carries diacritics is most likely
+        # already correct. Only replace it on a very strong lexicon match.
+        src_special = self._special_count(cleaned)
+
         if folded in self.folded_values:
-            for word, folded_word in self.folded.items():
-                if folded_word == folded:
-                    return restore_case(token, word)
+            matches = [w for w, fw in self.folded.items() if fw == folded]
+            if cleaned in matches:
+                return restore_case(token, cleaned)
+            best = max(matches, key=self._special_count)
+            # Take the lexicon form only if it keeps at least as many diacritics
+            # as the source; otherwise the VLM's spelling is the safer bet.
+            if self._special_count(best) >= src_special:
+                return restore_case(token, best)
+            return restore_case(token, cleaned)
 
         candidate_pool = list(self.by_initial.get(folded[:1], []))
         if len(folded) <= 3:
@@ -210,12 +226,26 @@ class KazakhWordCorrector:
             elif score < second_score:
                 second_score = score
 
+        # Same word up to diacritics: accept only when it does not *strip*
+        # diacritics the VLM already placed (those are usually right).
         exact_diacritic_upgrade = fold_token(best_word) == folded and best_word != cleaned
-        if exact_diacritic_upgrade:
+        if exact_diacritic_upgrade and self._special_count(best_word) >= src_special:
             return restore_case(token, best_word)
 
         normalized_score = best_score / max(1.0, len(folded))
         margin = second_score - best_score
+
+        # Token already has diacritics -> require a near-exact match to overrule,
+        # and never swap it for a candidate that carries fewer diacritics (the
+        # VLM's accents are usually right; the lexicon may hold folded forms).
+        if src_special > 0:
+            if (
+                normalized_score <= 0.10
+                and margin >= 0.25
+                and self._special_count(best_word) >= src_special
+            ):
+                return restore_case(token, best_word)
+            return restore_case(token, self.looks_kazakhish(cleaned))
 
         if len(folded) <= 2:
             if normalized_score <= 0.34 and margin >= 0.2:
